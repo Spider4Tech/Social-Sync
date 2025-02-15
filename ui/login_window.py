@@ -1,9 +1,16 @@
 import sys
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton, QMessageBox
+import os
+import hashlib
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton, QMessageBox, QInputDialog
 from PyQt5.QtGui import QFont
 from PyQt5.QtCore import Qt
+from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
+import base64
 
 from ui.main_window import MainWindow
+from ui.syn_ui import SocialSyncUI
 
 
 class LoginWindow(QWidget):
@@ -20,13 +27,6 @@ class LoginWindow(QWidget):
         title_label.setFont(QFont("Arial", 24, QFont.Bold))
         title_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(title_label)
-
-        # Champ pour le nom d'utilisateur
-        username_label = QLabel("Nom d'utilisateur:")
-        self.username_input = QLineEdit()
-        self.username_input.setPlaceholderText("Entrez votre nom d'utilisateur")
-        layout.addWidget(username_label)
-        layout.addWidget(self.username_input)
 
         # Champ pour le mot de passe
         password_label = QLabel("Mot de passe:")
@@ -74,16 +74,85 @@ class LoginWindow(QWidget):
         """)
 
     def handle_login(self):
-        username = self.username_input.text()
         password = self.password_input.text()
+        file_path = "tokens.txt"
 
-        # Vérification des identifiants (à remplacer par une vérification réelle)
-        if username == "admin" and password == "password":
-            self.open_main_window()
+        if not os.path.exists(file_path):
+            self.create_new_password_file(password, file_path)
         else:
-            QMessageBox.warning(self, "Erreur", "Nom d'utilisateur ou mot de passe incorrect")
+            try:
+                stored_hash, encrypted_tokens = self.read_file(file_path)
+                if self.verify_password(password, stored_hash):
+                    tokens = self.decrypt_tokens(password, encrypted_tokens)
+                    if tokens:
+                        QMessageBox.information(self, "Succès", "Connexion réussie!")
+                        # Ouvrir la fenêtre principale ici
+                        self.open_main_window()
+                    else:
+                        self.open_sync_window()
+                        QMessageBox.warning(self, "Erreur", "pas de token")
+                else:
+                    QMessageBox.warning(self, "Erreur", "Mot de passe incorrect")
+            except Exception as e:
+                QMessageBox.critical(self, "Erreur", f"Erreur lors du déchiffrement: {e}")
+
 
     def open_main_window(self):
         self.main_window = MainWindow()
         self.main_window.show()
         self.close()
+
+    def open_sync_window(self):
+        self.sync_window = SocialSyncUI()
+        self.sync_window.show()
+        self.close()
+
+
+    def create_new_password_file(self, password, file_path):
+        confirm_password, ok = QInputDialog.getText(self, "Créer un mot de passe", "Veuillez confirmer votre mot de passe:", QLineEdit.Password)
+        if ok and confirm_password == password:
+            # Créer un fichier avec le hachage du mot de passe et les jetons chiffrés
+            password_hash = hashlib.sha256(password.encode()).hexdigest()
+
+            with open(file_path, 'w') as f:
+                f.write(password_hash + "\n")
+
+            QMessageBox.information(self, "Succès", "Fichier de mot de passe créé avec succès!")
+        else:
+            QMessageBox.warning(self, "Erreur", "Les mots de passe ne correspondent pas.")
+
+    def read_file(self, file_path):
+        with open(file_path, 'r') as f:
+            lines = f.readlines()
+
+        stored_hash = lines[0].strip()
+        encrypted_tokens = lines[1:]
+
+        return stored_hash, encrypted_tokens
+
+    def verify_password(self, password, stored_hash):
+        print(hashlib.sha256(password.encode()).hexdigest())
+        print(stored_hash)
+        print(hashlib.sha256(password.encode()).hexdigest() == stored_hash)
+        return hashlib.sha256(password.encode()).hexdigest() == stored_hash
+
+    def decrypt_tokens(self, password, encrypted_tokens):
+        decrypted_tokens = []
+
+        for encrypted_token in encrypted_tokens:
+            encrypted_token = base64.b64decode(encrypted_token.strip().encode())
+            salt = encrypted_token[:16]
+            iv = encrypted_token[16:32]
+            encrypted_token = encrypted_token[32:]
+
+            kdf = Scrypt(salt=salt, length=32, n=2**14, r=8, p=1, backend=default_backend())
+            key = kdf.derive(password.encode())
+
+            cipher = Cipher(algorithms.AES(key), modes.CFB(iv), backend=default_backend())
+            decryptor = cipher.decryptor()
+            token = decryptor.update(encrypted_token) + decryptor.finalize()
+
+            decrypted_tokens.append(token.decode())
+
+        return decrypted_tokens
+
